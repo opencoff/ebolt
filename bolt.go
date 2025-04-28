@@ -26,10 +26,6 @@ var _ DB = &bdb{}
 // paths in plaintext. This compromise gives us better performance
 // without sacrificing too much privacy.
 func Open(fn string, key []byte, opt *bolt.Options) (DB, error) {
-	// AES-256-GCM hard coded keysize
-	if len(key) != 32 {
-		return nil, fmt.Errorf("db %s: Wrong encryption key size (%d)", fn, len(key))
-	}
 	db, err := bolt.Open(fn, 0600, opt)
 	if err != nil {
 		return nil, fmt.Errorf("db %s: %w", fn, err)
@@ -134,7 +130,7 @@ func (b *bdb) DelMany(v []string) error {
 
 // All retrieves all entries within a given bucket path, returning a map
 // of decrypted key-value pairs. The keys in the map are the original
-// unobfuscated keys.
+// unobfuscated key-paths.
 func (b *bdb) All(p string) (map[string][]byte, error) {
 	tx, err := b.beginXact(false)
 	if err != nil {
@@ -148,7 +144,7 @@ func (b *bdb) All(p string) (map[string][]byte, error) {
 
 // AllKeys returns all keys within a given bucket path without
 // retrieving their values. The returned keys are the original
-// unobfuscated keys.
+// unobfuscated key-paths.
 func (b *bdb) AllKeys(p string) ([]string, error) {
 	tx, err := b.beginXact(false)
 	if err != nil {
@@ -163,7 +159,7 @@ func (b *bdb) AllKeys(p string) ([]string, error) {
 // Dir returns all sub-buckets under the specified path without
 // retrieving individual key-value pairs. In boltdb terminology,
 // this returns all sub-buckets of a bucket.
-func (b *bdb) Dir(p string) ([][]byte, error) {
+func (b *bdb) Dir(p string) ([]string, error) {
 	tx, err := b.beginXact(false)
 	if err != nil {
 		return nil, err

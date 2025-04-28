@@ -44,18 +44,18 @@ type Ops interface {
 
 	// All retrieves all entries within a given bucket path, returning a map
 	// of decrypted key-value pairs. The keys in the map are the original
-	// unobfuscated keys.
+	// unobfuscated keys (including their full path).
 	All(p string) (map[string][]byte, error)
 
 	// AllKeys returns all keys within a given bucket path without
 	// retrieving their values. The returned keys are the original
-	// unobfuscated keys.
+	// unobfuscated keys (including their full path).
 	AllKeys(p string) ([]string, error)
 
 	// Dir returns all sub-buckets under the specified path without
 	// retrieving individual key-value pairs. In boltdb terminology,
 	// this returns all sub-buckets of a bucket.
-	Dir(p string) ([][]byte, error)
+	Dir(p string) ([]string, error)
 }
 
 // DB interface extends Ops with database management functionality

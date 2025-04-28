@@ -5,13 +5,13 @@ with transparent encryption capabilities.
 ## Features
 
 - **Hierarchical Path Structure**: Use intuitive paths like "users/profiles/john"
-  with automatic bucket creation
-- **Transparent Encryption**: All values are automatically encrypted and decrypted
-- **Key Obfuscation**: Leaf keys are obfuscated while preserving bucket structure
-  for efficient navigation
-- **Transaction Support**: Full atomic operations with commit/abort capabilities
-- **Backup Support**: Live, encrypted database backups without interrupting service
-- **Cross-Platform**: Works on Linux, macOS, and Windows
+  with automatic bucket creation for the key/value pairs.
+- **Transparent Encryption**: All keys & values are encrypted and decrypted with
+   AES-256-GCM.
+- **Key Obfuscation**: The DB path segments are individually encrypted.
+- **Transaction Support**: Full atomic operations with commit/rollback capabilities.
+- **Backup Support**: Live, encrypted database backups without interrupting service.
+- **Cross-Platform**: Works on Linux, macOS, and Windows.
 
 ## Installation
 
@@ -23,99 +23,14 @@ go get github.com/opencoff/ebolt
 
 Ebolt enhances the popular bbolt key-value store by adding:
 
-1. **Encryption Layer**: All stored values are encrypted before writing and decrypted when read
+1. **Encryption Layer**: All stored keys & values are encrypted before writing and decrypted when read
 2. **Path-Based Access**: Keys are specified as paths (e.g., "users/settings/theme") where
    intermediate components become buckets
 3. **Auto-Vivification**: Intermediate buckets are automatically created when setting values
-4. **Key Obfuscation**: Only leaf keys are obfuscated, keeping intermediate bucket names readable
-   for easier debugging
+4. **Simple API**: Simple API to get/set, query
 
 This library is ideal for applications that need to store sensitive data while maintaining the performance
 and simplicity of bbolt.
-
-## Interface Documentation
-
-### Types and Interfaces
-
-```go
-// KV represents a key-value pair for storage operations
-type KV struct {
-    Key string
-    Val []byte
-}
-
-// Ops interface defines the core operations for the encrypted database
-type Ops interface {
-    // Get retrieves and decrypts the value stored at the specified path.
-    // The path format "a/b/name" is interpreted where intermediate components
-    // are buckets and the final component is the key.
-    Get(p string) ([]byte, error)
-    
-    // Set encrypts and stores a value at the specified path, automatically
-    // creating any intermediate buckets as needed. The leaf component of the
-    // path is obfuscated while bucket names remain in plaintext.
-    Set(p string, v []byte) error
-
-    // SetMany encrypts and stores multiple key-value pairs. Each key follows
-    // the path format with automatic bucket creation.
-    SetMany(v []KV) error
-
-    // Del removes the encrypted value at the specified path.
-    Del(p string) error
-
-    // DelMany deletes multiple keys in a single transaction.
-    // Each path is processed according to the hierarchical bucket structure.
-    DelMany(v []string) error
-
-    // All retrieves all entries within a given bucket path, returning a map
-    // of decrypted key-value pairs. The keys in the map are the original 
-    // unobfuscated keys.
-    All(p string) (map[string][]byte, error)
-    
-    // AllKeys returns all keys within a given bucket path without
-    // retrieving their values. The returned keys are the original
-    // unobfuscated keys.
-    AllKeys(p string) ([]string, error)
-    
-    // Dir returns all sub-buckets under the specified path without
-    // retrieving individual key-value pairs. In boltdb terminology,
-    // this returns all sub-buckets of a bucket.
-    Dir(p string) ([][]byte, error)
-}
-
-// DB interface extends Ops with database management functionality
-type DB interface {
-    // Ops embeds all operations from the Ops interface
-    Ops
-    
-    // Close finalizes all transactions and releases database resources.
-    Close() error
-    
-    // BeginTransaction starts a new transaction that can be either read-only
-    // or read-write. Multiple read-only transactions can run concurrently,
-    // but write transactions are exclusive.
-    BeginTransaction(writable bool) (Tx, error)
-    
-    // Backup performs a live backup of the encrypted database to the provided
-    // io.Writer, returning the number of bytes written. The database remains
-    // usable during the backup process.
-    Backup(wr io.Writer) (int64, error)
-}
-
-// Tx interface represents an active transaction
-type Tx interface {
-    // Ops embeds all operations from the Ops interface
-    Ops
-    
-    // Commit persists all changes made within this transaction to the database.
-    // After calling Commit, the transaction is no longer usable.
-    Commit() error
-    
-    // Rollback discards all changes made within this transaction.
-    // After calling Rollback, the transaction is no longer usable.
-    Rollback() error
-}
-```
 
 ## Usage Examples
 
@@ -293,6 +208,91 @@ func main() {
 
     log.Printf("Backup completed successfully: %d bytes written", bytes)
 }
+
+## Interface Documentation
+
+### Types and Interfaces
+
+```go
+// KV represents a key-value pair for storage operations
+type KV struct {
+    Key string
+    Val []byte
+}
+
+// Ops interface defines the core operations for the encrypted database
+type Ops interface {
+    // Get retrieves and decrypts the value stored at the specified path.
+    // The path format "a/b/name" is interpreted where intermediate components
+    // are buckets and the final component is the key.
+    Get(p string) ([]byte, error)
+    
+    // Set encrypts and stores a value at the specified path, automatically
+    // creating any intermediate buckets as needed. The leaf component of the
+    // path is obfuscated while bucket names remain in plaintext.
+    Set(p string, v []byte) error
+
+    // SetMany encrypts and stores multiple key-value pairs. Each key follows
+    // the path format with automatic bucket creation.
+    SetMany(v []KV) error
+
+    // Del removes the encrypted value at the specified path.
+    Del(p string) error
+
+    // DelMany deletes multiple keys in a single transaction.
+    // Each path is processed according to the hierarchical bucket structure.
+    DelMany(v []string) error
+
+    // All retrieves all entries within a given bucket path, returning a map
+    // of decrypted key-value pairs. The keys in the map are the original 
+    // unobfuscated keys (including their full path).
+    All(p string) (map[string][]byte, error)
+    
+    // AllKeys returns all keys within a given bucket path without
+    // retrieving their values. The returned keys are the original
+    // unobfuscated keys (including their full path).
+    AllKeys(p string) ([]string, error)
+    
+    // Dir returns all sub-buckets under the specified path without
+    // retrieving individual key-value pairs. In boltdb terminology,
+    // this returns all sub-buckets of a bucket.
+    Dir(p string) ([][]byte, error)
+}
+
+// DB interface extends Ops with database management functionality
+type DB interface {
+    // Ops embeds all operations from the Ops interface
+    Ops
+    
+    // Close finalizes all transactions and releases database resources.
+    Close() error
+    
+    // BeginTransaction starts a new transaction that can be either read-only
+    // or read-write. Multiple read-only transactions can run concurrently,
+    // but write transactions are exclusive.
+    BeginTransaction(writable bool) (Tx, error)
+    
+    // Backup performs a live backup of the encrypted database to the provided
+    // io.Writer, returning the number of bytes written. The database remains
+    // usable during the backup process.
+    Backup(wr io.Writer) (int64, error)
+}
+
+// Tx interface represents an active transaction
+type Tx interface {
+    // Ops embeds all operations from the Ops interface
+    Ops
+    
+    // Commit persists all changes made within this transaction to the database.
+    // After calling Commit, the transaction is no longer usable.
+    Commit() error
+    
+    // Rollback discards all changes made within this transaction.
+    // After calling Rollback, the transaction is no longer usable.
+    Rollback() error
+}
+```
+
 ```
 
 ### Database Encryption Keys
@@ -319,11 +319,20 @@ account for your security needs.
 
 ### Cryptography
 `cipher.go` implements the necessary cryptography. The user provided key is expanded with domain
-separation into a MAC key and an AEAD key. The MAC key is used for obfuscating the leaf names of a
-key-path while the AEAD key is used to encrypt the values.
+separation into two keys and a nonce. Each of the keys is used to construct an AEAD for keys and
+values respectively. Each segment of the path is encrypted with a common nonce, while the values
+all get unique, random nonces. In pseudo code:
 
-The encryption of the values uses AES-256-GCM with a random nonce. The actual key is stored along
-with the value as plaintext. This is necessary to implement the `AllKeys()` operation.
+```
+    keymat = HKDF-expand(master_key, "AES Keys and Nonce")
+    key_k, keymat = keymat[:32], keymat[32:]
+    val_k, keymat = keymat[:32], keymat[32:]
+    nonce = keymat
+
+    key_cipher = aes_256_GCM(key_k)
+    val_cipher = aes_256_GCM(val_k)
+```
+
 
 ## Related Projects
 

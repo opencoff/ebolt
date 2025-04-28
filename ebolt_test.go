@@ -79,11 +79,10 @@ func TestSetGetAll(t *testing.T) {
 	assert(err == nil, "All: %s", err)
 	done := make(map[string]bool)
 	for k, v := range m {
-		fn := path.Base(k)
-		v2, ok := m2[fn]
-		assert(ok, "expected to find %s", fn)
+		v2, ok := m2[k]
+		assert(ok, "%s: expected to find %s, saw %s", k, fn, v2)
 		assert(bytes.Equal(v2, v), "all: %s: content mismatch", k)
-		done[fn] = true
+		done[k] = true
 	}
 	for k := range m2 {
 		assert(done[k], "all: %s: unknown elem", k)
@@ -193,7 +192,7 @@ func TestMany(t *testing.T) {
 			Val: []byte(bn),
 		}
 		kv = append(kv, x)
-		m[bn] = nm
+		m[nm] = nm
 	}
 
 	err = db.SetMany(kv)

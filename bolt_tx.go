@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"slices"
-	"strings"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -27,6 +25,25 @@ func split(p string) (string, string) {
 		dn = ".root"
 	}
 	return dn, bn
+}
+
+// Encrypt every segment and return the prefix and leaf.
+func (t *xact) splitEncrypt(p string) ([][]byte, []byte) {
+	v := filepath.SplitList(filepath.Clean(p))
+	if len(v) == 1 {
+		z := v[0]
+		v = make([]string, 2)
+		v[0] = ".root"
+		v[1] = z
+	}
+
+	n := len(v)
+	out := make([][]byte, n)
+	for i := range n {
+		out[i] = t.c.encSegment(v[i])
+	}
+
+	return out[:n-1], out[n-1]
 }
 
 // create a new xact instance and record the encryptor
@@ -51,74 +68,58 @@ func (t *xact) Rollback() error {
 	return t.Tx.Rollback()
 }
 
-func (t *xact) mkbucket(p string) (*bolt.Bucket, error) {
-	v := strings.Split(p, "/")
-	if len(v) == 0 {
-		return nil, nil
-	}
-
-	bu, err := t.CreateBucketIfNotExists([]byte(v[0]))
+func (t *xact) mkbucket(p string) (*bolt.Bucket, []byte, error) {
+	v, nm := t.splitEncrypt(p)
+	bu, err := t.CreateBucketIfNotExists(v[0])
 	if err != nil {
-		return nil, &StorageError{"new-bucket", v[0], err}
+		return nil, nil, &StorageError{"new-bucket", p, err}
 	}
 
-	for _, nm := range v[1:] {
-		k := []byte(nm)
-		nb, err := bu.CreateBucketIfNotExists(k)
-		if err != nil {
-			return nil, &StorageError{"new-bucket", nm, err}
+	for i := range v[1:] {
+		if bu, err = bu.CreateBucketIfNotExists(v[i]); err != nil {
+			return nil, nil, &StorageError{"new-bucket", p, err}
 		}
-		bu = nb
 	}
-	return bu, nil
+	return bu, nm, nil
 }
 
-func (t *xact) bucket(p string) *bolt.Bucket {
-	v := strings.Split(p, "/")
-	if len(v) == 0 {
-		return nil
-	}
-
-	bu := t.Bucket([]byte(v[0]))
+func (t *xact) bucket(p string) (*bolt.Bucket, []byte) {
+	v, nm := t.splitEncrypt(p)
+	bu := t.Bucket(v[0])
 	if bu == nil {
-		return nil
+		return nil, nil
 	}
-	for _, nm := range v[1:] {
-		if bu = bu.Bucket([]byte(nm)); bu == nil {
-			return nil
+	for i := range v[1:] {
+		if bu = bu.Bucket(v[i]); bu == nil {
+			return nil, nil
 		}
 	}
-	return bu
+	return bu, nm
 }
 
 func (t *xact) Get(p string) ([]byte, error) {
-	dn, nm := split(p)
-	k := t.c.encKey(nm)
-
-	bu := t.bucket(dn)
+	bu, nm := t.bucket(p)
 	if bu == nil {
-		return nil, &StorageError{"get", dn, fmt.Errorf("bucket not found for %s", p)}
+		return nil, &StorageError{"get", p, fmt.Errorf("bucket not found for %s", p)}
 	}
-	v := bu.Get(k)
+	v := bu.Get(nm)
 	if v == nil {
 		return nil, nil
 	}
 	_, ret, err := t.c.decryptKV(v)
 	if err != nil {
-		return nil, &StorageError{"get", dn, err}
+		return nil, &StorageError{"get", p, err}
 	}
 	return ret, nil
 }
 
 func (t *xact) Set(p string, v []byte) error {
-	dn, nm := split(p)
-	k := t.c.encKey(nm)
-	bu, err := t.mkbucket(dn)
+	bu, nm, err := t.mkbucket(p)
 	if err != nil {
 		return &StorageError{"set", p, err}
 	}
-	v = t.c.encryptKV(nm, v)
-	if err = bu.Put(k, v); err != nil {
+	v = t.c.encryptKV(p, v)
+	if err = bu.Put(nm, v); err != nil {
 		return &StorageError{"set", p, err}
 	}
 
@@ -136,14 +137,12 @@ func (t *xact) SetMany(kv []KV) error {
 
 	for i := range kv {
 		w := &kv[i]
-		dn, nm := split(w.Key)
-		bu, err := t.mkbucket(dn)
+		bu, nm, err := t.mkbucket(w.Key)
 		if err != nil {
 			return &StorageError{"set-many", w.Key, err}
 		}
-		k := t.c.encKey(nm)
-		v := t.c.encryptKV(nm, w.Val)
-		if err = bu.Put(k, v); err != nil {
+		v := t.c.encryptKV(w.Key, w.Val)
+		if err = bu.Put(nm, v); err != nil {
 			return &StorageError{"set-many", w.Key, err}
 		}
 	}
@@ -151,14 +150,12 @@ func (t *xact) SetMany(kv []KV) error {
 }
 
 func (t *xact) Del(p string) error {
-	dn, nm := split(p)
-	k := t.c.encKey(nm)
-	bu := t.bucket(dn)
+	bu, nm := t.bucket(p)
 	if bu == nil {
-		return &StorageError{"del", dn, fmt.Errorf("bucket not found for %s", p)}
+		return &StorageError{"del", p, fmt.Errorf("bucket not found for %s", p)}
 	}
 
-	if err := bu.Delete(k); err != nil {
+	if err := bu.Delete(nm); err != nil {
 		return &StorageError{"del", p, err}
 	}
 	return nil
@@ -166,23 +163,20 @@ func (t *xact) Del(p string) error {
 
 func (t *xact) DelMany(v []string) error {
 	for _, p := range v {
-		dn, nm := split(p)
-		bu := t.bucket(dn)
+		bu, nm := t.bucket(p)
 		if bu == nil {
-			return &StorageError{"del", dn, fmt.Errorf("bucket not found for %s", p)}
+			return &StorageError{"del", p, fmt.Errorf("bucket not found for %s", p)}
 		}
-		k := t.c.encKey(nm)
-		if err := bu.Delete(k); err != nil {
+		if err := bu.Delete(nm); err != nil {
 			return &StorageError{"del", p, err}
 		}
 	}
 	return nil
 }
 
-// All returns the key-value pairs in the bucket 'p'.
 func (t *xact) All(p string) (map[string][]byte, error) {
 	ret := make(map[string][]byte)
-	bu := t.bucket(p)
+	bu, _ := t.bucket(p)
 	if bu == nil {
 		return nil, &StorageError{"all", p, fmt.Errorf("bucket not found")}
 	}
@@ -198,9 +192,8 @@ func (t *xact) All(p string) (map[string][]byte, error) {
 	return ret, err
 }
 
-// All returns the keys pairs in the bucket 'p'.
 func (t *xact) AllKeys(p string) ([]string, error) {
-	bu := t.bucket(p)
+	bu, _ := t.bucket(p)
 	if bu == nil {
 		return nil, &StorageError{"all", p, fmt.Errorf("bucket not found")}
 	}
@@ -222,15 +215,19 @@ func (t *xact) AllKeys(p string) ([]string, error) {
 	return keys, nil
 }
 
-func (t *xact) Dir(p string) ([][]byte, error) {
-	bu := t.bucket(p)
+func (t *xact) Dir(p string) ([]string, error) {
+	bu, _ := t.bucket(p)
 	if bu == nil {
 		return nil, &StorageError{"all", p, fmt.Errorf("bucket not found")}
 	}
 
-	var ret [][]byte
+	var ret []string
 	err := bu.ForEachBucket(func(k []byte) error {
-		ret = append(ret, slices.Clone(k))
+		nm, err := t.c.decSegment(k)
+		if err != nil {
+			return err
+		}
+		ret = append(ret, nm)
 		return nil
 	})
 	if err != nil {
