@@ -208,6 +208,7 @@ func main() {
 
     log.Printf("Backup completed successfully: %d bytes written", bytes)
 }
+```
 
 ## Interface Documentation
 
@@ -293,8 +294,6 @@ type Tx interface {
 }
 ```
 
-```
-
 ### Database Encryption Keys
 If your db encryption key is already part of some KMS regime or a previous HKDF-like key
 expansion, then it's safe to use with `ebolt.Open()`.
@@ -314,8 +313,8 @@ account for your security needs.
 
 - The encryption is applied only to the values stored in the database, not to the database
   file itself.
-- Only leaf keys are obfuscated, keeping bucket names readable for easier debugging and navigation
-- Performance impact of encryption is expected to be minimal for most use cases
+- Only leaf keys are obfuscated, keeping bucket names readable for easier debugging and navigation.
+- Performance impact of encryption is expected to be minimal for most use cases.
 
 ### Cryptography
 `cipher.go` implements the necessary cryptography. The user provided key is expanded with domain
