@@ -5,6 +5,8 @@ package ebolt_test
 import (
 	"bytes"
 	crand "crypto/rand"
+	"crypto/sha3"
+	"fmt"
 	"math/rand/v2"
 	"path"
 	"path/filepath"
@@ -13,10 +15,17 @@ import (
 	"github.com/opencoff/ebolt"
 )
 
-func newBolt(fn string) (ebolt.DB, error) {
+func newBolt(fn string, pw string) (ebolt.DB, error) {
 	var key [32]byte
 
-	crand.Read(key[:])
+	if len(pw) == 0 {
+		crand.Read(key[:])
+	} else {
+		h := sha3.New256()
+		h.Write([]byte(pw))
+		h.Sum(key[:0])
+	}
+
 	return ebolt.Open(fn, key[:], nil)
 }
 
@@ -26,7 +35,7 @@ func TestSetGetOne(t *testing.T) {
 	tmp := getTmpdir(t)
 	fn := path.Join(tmp, "t.db")
 
-	db, err := newBolt(fn)
+	db, err := newBolt(fn, "")
 	assert(err == nil, "boltdb: %s", err)
 
 	k := "a/b/001"
@@ -54,7 +63,7 @@ func TestSetGetAll(t *testing.T) {
 	tmp := getTmpdir(t)
 	fn := path.Join(tmp, "t.db")
 
-	db, err := newBolt(fn)
+	db, err := newBolt(fn, "")
 	assert(err == nil, "boltdb: %s", err)
 
 	m := make(map[string][]byte)
@@ -103,10 +112,11 @@ func TestSetGetAll(t *testing.T) {
 }
 
 func update(m map[string]map[string]bool, dn string) map[string]map[string]bool {
+	orig := dn
 	for {
 		dir := filepath.Dir(dn)
 		fn := filepath.Base(dn)
-		if dir == "." {
+		if dir == "." || dir == "/" || dir == orig {
 			break
 		}
 		z, ok := m[dir]
@@ -118,6 +128,19 @@ func update(m map[string]map[string]bool, dn string) map[string]map[string]bool 
 		dn = dir
 	}
 	return m
+}
+
+func pr0(m map[string]bool, ind string) {
+	for k := range m {
+		fmt.Printf("%s%s:\n", ind, k)
+	}
+}
+
+func pr(m map[string]map[string]bool, ind string) {
+	for k, v := range m {
+		fmt.Printf("%s%s:\n", ind, k)
+		pr0(v, ind+"   ")
+	}
 }
 
 func TestDir(t *testing.T) {
@@ -135,18 +158,14 @@ func TestDir(t *testing.T) {
 	tmp := getTmpdir(t)
 	fn := path.Join(tmp, "t.db")
 
-	db, err := newBolt(fn)
+	db, err := newBolt(fn, "")
 	assert(err == nil, "boltdb: %s", err)
 
 	m := make(map[string][]byte)
 	subdirs := make(map[string]map[string]bool)
 	for _, nm := range paths {
 		m[nm] = randbytes()
-
-		dir := filepath.Dir(nm)
-		if dir != "." {
-			subdirs = update(subdirs, dir)
-		}
+		subdirs = update(subdirs, nm)
 	}
 
 	for k, v := range m {
@@ -154,12 +173,11 @@ func TestDir(t *testing.T) {
 		assert(err == nil, "set: %s: %s", k, err)
 	}
 
-	dirs, err := db.Dir("a")
+	dirs, err := db.Dir("a/b")
 	assert(err == nil, "Dir: %s", err)
 
-	want := subdirs["a"]
-	for _, v := range dirs {
-		nm := string(v)
+	want := subdirs["a/b"]
+	for _, nm := range dirs {
 		assert(want[nm], "missing %s", nm)
 	}
 
@@ -180,7 +198,7 @@ func TestMany(t *testing.T) {
 	tmp := getTmpdir(t)
 	fn := path.Join(tmp, "t.db")
 
-	db, err := newBolt(fn)
+	db, err := newBolt(fn, "")
 	assert(err == nil, "boltdb: %s", err)
 
 	m := make(map[string]string)
