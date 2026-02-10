@@ -10,6 +10,8 @@ import (
 	"crypto/rand"
 	"crypto/sha3"
 	"encoding/binary"
+
+	SIV "github.com/jedisct1/go-aes-siv"
 )
 
 // Encrypting Keys and Values:
@@ -18,52 +20,47 @@ import (
 //   keys and values separately. We also expand this into a
 //   shared nonce.
 // - Each path segment of a given key-path is encrypted separately
-//   with AES-GCM - but with a common nonce for all segments
+//   with AES-SIV and we use a passphrase derived "AD"
 // - Values are encrypted with a unique and random nonce
 // - We store a copy of the full unencrypted key-path along with the
 //   plaintext value; both are encrypted and treated as "value".
 
 type encryptor struct {
-	val   cipher.AEAD
-	key   cipher.AEAD
-	nonce []byte
+	kv  cipher.AEAD
+	seg *SIV.AESSIV
+
+	// We store
+	segAd []byte
 }
 
 // make a new encryptor with the given key
 func newEncryptor(key []byte) (*encryptor, error) {
-	// first compress the key with sha3 to lengthen potentially short keys
-	xpanded := sha3.Sum512(key)
-	keymat := expand(32+32+aes.BlockSize, xpanded[:], "DB Encryption Keys")
+	keymat := expand(32+32+aes.BlockSize, key[:], "DB Encryption Keys")
 	defer clear(keymat)
 
-	aekey, keymat := keymat[:32], keymat[32:]
-	ctrkey, keymat := keymat[:32], keymat[32:]
+	kvkey, keymat := keymat[:32], keymat[32:]
+	segkey, keymat := keymat[:32], keymat[32:]
 	iv := keymat
 
-	blk0, err := aes.NewCipher(aekey)
+	blk0, err := aes.NewCipher(kvkey)
 	if err != nil {
 		return nil, fmt.Errorf("aes: %w", err)
 	}
 
-	blk1, err := aes.NewCipher(ctrkey)
+	siv, err := SIV.New(segkey)
 	if err != nil {
-		return nil, fmt.Errorf("aes: %w", err)
+		return nil, fmt.Errorf("aes: siv: %w", err)
 	}
 
-	aead0, err := cipher.NewGCM(blk0)
-	if err != nil {
-		return nil, fmt.Errorf("aes-gcm: %w", err)
-	}
-
-	aead1, err := cipher.NewGCM(blk1)
+	kv, err := cipher.NewGCM(blk0)
 	if err != nil {
 		return nil, fmt.Errorf("aes-gcm: %w", err)
 	}
 
 	c := &encryptor{
-		key:   aead0,
-		val:   aead1,
-		nonce: iv[:aead0.NonceSize()],
+		kv:    kv,
+		seg:   siv,
+		segAd: iv[:kv.NonceSize()],
 	}
 	return c, nil
 }
@@ -71,20 +68,20 @@ func newEncryptor(key []byte) (*encryptor, error) {
 // Encrypt one path segment
 func (c *encryptor) encSegment(s string) []byte {
 	nm := []byte(s)
-	z := make([]byte, len(nm)+c.key.Overhead())
+	z := make([]byte, len(nm)+c.seg.Overhead())
 
-	ct := c.key.Seal(z[:0], c.nonce, nm, nil)
+	ct := c.seg.Seal(z[:0], nil, nm, c.segAd)
 	return ct
 }
 
 // Decrypt one path segment
 func (c *encryptor) decSegment(v []byte) (string, error) {
-	if len(v) < c.key.Overhead() {
+	if len(v) < c.seg.Overhead() {
 		return "", fmt.Errorf("seg: too short (%d)", len(v))
 	}
 
-	z := make([]byte, len(v)-c.key.Overhead())
-	pt, err := c.key.Open(z[:0], c.nonce, v, nil)
+	z := make([]byte, len(v)-c.seg.Overhead())
+	pt, err := c.seg.Open(z[:0], nil, v, c.segAd)
 	if err != nil {
 		return "", err
 	}
@@ -93,8 +90,8 @@ func (c *encryptor) decSegment(v []byte) (string, error) {
 
 // Encrypt the key & values for a given kv pair
 func (c *encryptor) encryptKV(k string, v []byte) []byte {
-	nl := c.val.NonceSize()
-	ov := c.val.Overhead()
+	nl := c.kv.NonceSize()
+	ov := c.kv.Overhead()
 
 	ct := make([]byte, nl+ov+len(k)+len(v)+4)
 	nonce, pt := ct[:nl], ct[nl:]
@@ -106,14 +103,14 @@ func (c *encryptor) encryptKV(k string, v []byte) []byte {
 	z = xcopy(z, v)
 	n := cap(pt) - cap(z)
 
-	z = c.val.Seal(pt[:0], nonce, pt[:n], nil)
+	z = c.kv.Seal(pt[:0], nonce, pt[:n], nil)
 	return ct
 }
 
 // Decrypt the key, value pair in 'ct'
 func (c *encryptor) decryptKV(ct []byte) (string, []byte, error) {
-	nl := c.val.NonceSize()
-	ov := c.val.Overhead()
+	nl := c.kv.NonceSize()
+	ov := c.kv.Overhead()
 
 	if len(ct) < (nl + ov + 4) {
 		return "", nil, fmt.Errorf("aes-gcm decrypt: buf len %d too small", len(ct))
@@ -122,7 +119,7 @@ func (c *encryptor) decryptKV(ct []byte) (string, []byte, error) {
 	pt := make([]byte, len(ct)-ov-4)
 	nonce, ct := ct[:nl], ct[nl:]
 
-	pt, err := c.val.Open(pt[:0], nonce, ct, nil)
+	pt, err := c.kv.Open(pt[:0], nonce, ct, nil)
 	if err != nil {
 		return "", nil, fmt.Errorf("aes-gcm decrypt: %w", err)
 	}
