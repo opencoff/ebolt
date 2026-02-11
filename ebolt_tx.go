@@ -10,45 +10,33 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+type journalOpType uint8
+
+const (
+	J_OP_NONE journalOpType = iota
+	J_OP_TX_BEGIN
+	J_OP_SET
+	J_OP_DEL
+	J_OP_TX_END
+)
+
+type op struct {
+	ty   journalOpType
+	path [][]byte
+	leaf []byte
+	val  []byte
+}
+
 type xact struct {
 	*bolt.Tx
 	errs []error
 	c    *encryptor
 
 	// change set
+	ops []op
 }
-
-const (
-	JRNL_OP_NONE uint8 = iota
-	JRNL_OP_TX_BEGIN
-	JRNL_OP_SET
-	JRNL_OP_DEL
-	JRNL_OP_TX_END
-)
 
 var _ Tx = &xact{}
-
-// create a new xact instance and record the encryptor
-func (b *bdb) beginXact(wr bool) (*xact, error) {
-	tx, err := b.db.Begin(wr)
-	if err != nil {
-		return nil, &StorageError{"begin-tx", "", err}
-	}
-
-	t := &xact{
-		Tx: tx,
-		c:  b.c,
-	}
-	return t, nil
-}
-
-func (t *xact) Commit() error {
-	return t.Tx.Commit()
-}
-
-func (t *xact) Rollback() error {
-	return t.Tx.Rollback()
-}
 
 func splitLeaf(p string) []string {
 	v := strings.Split(p, "/")
@@ -309,12 +297,61 @@ func (t *xact) Dir(p string) ([]string, error) {
 	return ret, nil
 }
 
+// -- Transaction Mgmt --
+
+// create a new xact instance and record the encryptor
+func (b *bdb) beginXact(wr bool) (*xact, error) {
+	tx, err := b.db.Begin(wr)
+	if err != nil {
+		return nil, &StorageError{"begin-tx", "", err}
+	}
+
+	t := &xact{
+		Tx: tx,
+		c:  b.c,
+
+		ops: make([]op, 0, 4),
+	}
+
+	t.ops = append(t.ops, op{ty: J_OP_TX_BEGIN})
+	return t, nil
+}
+
+func (t *xact) Commit() error {
+
+	t.ops = append(t.ops, op{ty: J_OP_TX_END})
+
+	// XXX Send the transaction bunch
+	// Send it to a journal goroutine that will distribute to each replica
+	return t.Tx.Commit()
+}
+
+func (t *xact) Rollback() error {
+	t.ops = t.ops[:0]
+	return t.Tx.Rollback()
+}
+
 func (t *xact) backup(wr io.Writer) (int64, error) {
 	return t.WriteTo(wr)
 }
 
 func (t *xact) recordSet(b *bucket, v []byte) {
+	o := op{
+		ty:   J_OP_SET,
+		path: b.path,
+		leaf: b.leaf,
+		val:  v,
+	}
+
+	t.ops = append(t.ops, o)
 }
 
 func (t *xact) recordDel(b *bucket) {
+	o := op{
+		ty:   J_OP_DEL,
+		path: b.path,
+		leaf: b.leaf,
+	}
+
+	t.ops = append(t.ops, o)
 }
