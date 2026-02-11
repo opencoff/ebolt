@@ -1,4 +1,4 @@
-// bolt.go -- Encrypted boltdb based implementation of storage.DB
+// ebolt.go -- Encrypted wrapper for boltdb
 
 package ebolt
 
@@ -9,7 +9,11 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-type Options = bolt.Options
+type Options struct {
+	bolt.Options
+
+	// replication data
+}
 
 type bdb struct {
 	db *bolt.DB
@@ -25,8 +29,14 @@ var _ DB = &bdb{}
 // leaf of a key-path is obfuscated while preserving the intermediate
 // paths in plaintext. This compromise gives us better performance
 // without sacrificing too much privacy.
-func Open(fn string, key []byte, opt *bolt.Options) (DB, error) {
-	db, err := bolt.Open(fn, 0600, opt)
+func Open(fn string, key []byte, opt *Options) (DB, error) {
+	var bopt *bolt.Options
+
+	if opt != nil {
+		bopt = &opt.Options
+	}
+
+	db, err := bolt.Open(fn, 0600, bopt)
 	if err != nil {
 		return nil, fmt.Errorf("db %s: %w", fn, err)
 	}

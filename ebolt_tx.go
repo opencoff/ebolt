@@ -14,7 +14,17 @@ type xact struct {
 	*bolt.Tx
 	errs []error
 	c    *encryptor
+
+	// change set
 }
+
+const (
+	JRNL_OP_NONE uint8 = iota
+	JRNL_OP_TX_BEGIN
+	JRNL_OP_SET
+	JRNL_OP_DEL
+	JRNL_OP_TX_END
+)
 
 var _ Tx = &xact{}
 
@@ -70,9 +80,20 @@ func (t *xact) encPath(v []string) [][]byte {
 	return z
 }
 
+// Our representation of a bucket and the path to it.
+type bucket struct {
+	*bolt.Bucket
+
+	// path to bucket
+	path [][]byte
+
+	// the leaf node
+	leaf []byte
+}
+
 // given a path to a leaf-node (the "K" in KV) - return the intermediate
 // buckets and encrypted leaf
-func (t *xact) leaf2bucket(p string) (*bolt.Bucket, []byte) {
+func (t *xact) leaf2bucket(p string) *bucket {
 	v := splitLeaf(p)
 	z := t.encPath(v)
 	n := len(z)
@@ -81,19 +102,25 @@ func (t *xact) leaf2bucket(p string) (*bolt.Bucket, []byte) {
 
 	bu := t.Bucket(z[0])
 	if bu == nil {
-		return nil, nil
+		return nil
 	}
 	for _, x := range z[1:] {
 		if bu = bu.Bucket(x); bu == nil {
-			return nil, nil
+			return nil
 		}
 	}
-	return bu, nm
+
+	b := &bucket{
+		Bucket: bu,
+		path:   z,
+		leaf:   nm,
+	}
+	return b
 }
 
 // given a path to a leaf-node (the "K" in KV) - make the intermediate
 // buckets and return encrypted leaf name
-func (t *xact) mkleaf2bucket(p string) (*bolt.Bucket, []byte, error) {
+func (t *xact) mkleaf2bucket(p string) (*bucket, error) {
 	v := splitLeaf(p)
 	z := t.encPath(v)
 	n := len(z)
@@ -101,15 +128,21 @@ func (t *xact) mkleaf2bucket(p string) (*bolt.Bucket, []byte, error) {
 
 	bu, err := t.CreateBucketIfNotExists(z[0])
 	if err != nil {
-		return nil, nil, &StorageError{"new-bucket", p, err}
+		return nil, &StorageError{"new-bucket", p, err}
 	}
 
 	for _, x := range z[1:] {
 		if bu, err = bu.CreateBucketIfNotExists(x); err != nil {
-			return nil, nil, &StorageError{"new-bucket", p, err}
+			return nil, &StorageError{"new-bucket", p, err}
 		}
 	}
-	return bu, nm, nil
+
+	b := &bucket{
+		Bucket: bu,
+		path:   z,
+		leaf:   nm,
+	}
+	return b, nil
 }
 
 // given a dir name, return the encrypted path segments
@@ -130,11 +163,12 @@ func (t *xact) dir2bucket(p string) *bolt.Bucket {
 }
 
 func (t *xact) Get(p string) ([]byte, error) {
-	bu, nm := t.leaf2bucket(p)
-	if bu == nil {
+	b := t.leaf2bucket(p)
+	if b == nil {
 		return nil, &StorageError{"get", p, fmt.Errorf("bucket not found for %s", p)}
 	}
-	v := bu.Get(nm)
+
+	v := b.Get(b.leaf)
 	if v == nil {
 		return nil, nil
 	}
@@ -146,15 +180,17 @@ func (t *xact) Get(p string) ([]byte, error) {
 }
 
 func (t *xact) Set(p string, v []byte) error {
-	bu, nm, err := t.mkleaf2bucket(p)
+	b, err := t.mkleaf2bucket(p)
 	if err != nil {
 		return &StorageError{"set", p, err}
 	}
 	v = t.c.encryptKV(p, v)
-	if err = bu.Put(nm, v); err != nil {
+
+	if err = b.Put(b.leaf, v); err != nil {
 		return &StorageError{"set", p, err}
 	}
 
+	t.recordSet(b, v)
 	return err
 }
 
@@ -169,39 +205,44 @@ func (t *xact) SetMany(kv []KV) error {
 
 	for i := range kv {
 		w := &kv[i]
-		bu, nm, err := t.mkleaf2bucket(w.Key)
+		b, err := t.mkleaf2bucket(w.Key)
 		if err != nil {
 			return &StorageError{"set-many", w.Key, err}
 		}
 		v := t.c.encryptKV(w.Key, w.Val)
-		if err = bu.Put(nm, v); err != nil {
+		if err = b.Put(b.leaf, v); err != nil {
 			return &StorageError{"set-many", w.Key, err}
 		}
+
+		// Add to transaction
+		t.recordSet(b, v)
 	}
 	return nil
 }
 
 func (t *xact) Del(p string) error {
-	bu, nm := t.leaf2bucket(p)
-	if bu == nil {
+	b := t.leaf2bucket(p)
+	if b == nil {
 		return &StorageError{"del", p, fmt.Errorf("bucket not found for %s", p)}
 	}
 
-	if err := bu.Delete(nm); err != nil {
+	if err := b.Delete(b.leaf); err != nil {
 		return &StorageError{"del", p, err}
 	}
+	t.recordDel(b)
 	return nil
 }
 
 func (t *xact) DelMany(v []string) error {
 	for _, p := range v {
-		bu, nm := t.leaf2bucket(p)
-		if bu == nil {
+		b := t.leaf2bucket(p)
+		if b == nil {
 			return &StorageError{"del", p, fmt.Errorf("bucket not found for %s", p)}
 		}
-		if err := bu.Delete(nm); err != nil {
+		if err := b.Delete(b.leaf); err != nil {
 			return &StorageError{"del", p, err}
 		}
+		t.recordDel(b)
 	}
 	return nil
 }
@@ -270,4 +311,10 @@ func (t *xact) Dir(p string) ([]string, error) {
 
 func (t *xact) backup(wr io.Writer) (int64, error) {
 	return t.WriteTo(wr)
+}
+
+func (t *xact) recordSet(b *bucket, v []byte) {
+}
+
+func (t *xact) recordDel(b *bucket) {
 }
