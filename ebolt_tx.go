@@ -14,10 +14,8 @@ type journalOpType uint8
 
 const (
 	J_OP_NONE journalOpType = iota
-	J_OP_TX_BEGIN
 	J_OP_SET
 	J_OP_DEL
-	J_OP_TX_END
 )
 
 type op struct {
@@ -29,10 +27,10 @@ type op struct {
 
 type xact struct {
 	*bolt.Tx
-	errs []error
-	c    *encryptor
 
-	// change set
+	db *bdb
+
+	// change set: nil for RO transactions
 	ops []op
 }
 
@@ -61,9 +59,10 @@ func splitBucket(p string) []string {
 }
 
 func (t *xact) encPath(v []string) [][]byte {
+	c := t.db.c
 	z := make([][]byte, len(v))
 	for i := range v {
-		z[i] = t.c.encSegment(v[i])
+		z[i] = c.encSegment(v[i])
 	}
 	return z
 }
@@ -160,7 +159,7 @@ func (t *xact) Get(p string) ([]byte, error) {
 	if v == nil {
 		return nil, nil
 	}
-	_, ret, err := t.c.decryptKV(v)
+	_, ret, err := t.db.c.decryptKV(v)
 	if err != nil {
 		return nil, &StorageError{"get", p, err}
 	}
@@ -172,7 +171,7 @@ func (t *xact) Set(p string, v []byte) error {
 	if err != nil {
 		return &StorageError{"set", p, err}
 	}
-	v = t.c.encryptKV(p, v)
+	v = t.db.c.encryptKV(p, v)
 
 	if err = b.Put(b.leaf, v); err != nil {
 		return &StorageError{"set", p, err}
@@ -191,13 +190,14 @@ func (t *xact) SetMany(kv []KV) error {
 		return t.Set(x.Key, x.Val)
 	}
 
+	c := t.db.c
 	for i := range kv {
 		w := &kv[i]
 		b, err := t.mkleaf2bucket(w.Key)
 		if err != nil {
 			return &StorageError{"set-many", w.Key, err}
 		}
-		v := t.c.encryptKV(w.Key, w.Val)
+		v := c.encryptKV(w.Key, w.Val)
 		if err = b.Put(b.leaf, v); err != nil {
 			return &StorageError{"set-many", w.Key, err}
 		}
@@ -241,8 +241,10 @@ func (t *xact) All(p string) (map[string][]byte, error) {
 	if bu == nil {
 		return nil, &StorageError{"all", p, fmt.Errorf("bucket not found")}
 	}
+
+	c := t.db.c
 	err := bu.ForEach(func(_, v []byte) error {
-		nm, v, err := t.c.decryptKV(v)
+		nm, v, err := c.decryptKV(v)
 		if err != nil {
 			return &StorageError{"all", p, err}
 		}
@@ -260,8 +262,9 @@ func (t *xact) AllKeys(p string) ([]string, error) {
 	}
 
 	var keys []string
+	c := t.db.c
 	err := bu.ForEach(func(_, v []byte) error {
-		nm, _, err := t.c.decryptKV(v)
+		nm, _, err := c.decryptKV(v)
 		if err != nil {
 			return &StorageError{"all", p, err}
 		}
@@ -283,8 +286,9 @@ func (t *xact) Dir(p string) ([]string, error) {
 	}
 
 	var ret []string
+	c := t.db.c
 	err := bu.ForEachBucket(func(k []byte) error {
-		nm, err := t.c.decSegment(k)
+		nm, err := c.decSegment(k)
 		if err != nil {
 			return err
 		}
@@ -306,28 +310,43 @@ func (b *bdb) beginXact(wr bool) (*xact, error) {
 		return nil, &StorageError{"begin-tx", "", err}
 	}
 
-	t := &xact{
-		Tx: tx,
-		c:  b.c,
-
-		ops: make([]op, 0, 4),
+	var ops []op
+	if wr {
+		ops = make([]op, 0, 4)
 	}
 
-	t.ops = append(t.ops, op{ty: J_OP_TX_BEGIN})
+	t := &xact{
+		Tx:  tx,
+		db:  b,
+		ops: ops,
+	}
+
 	return t, nil
 }
 
 func (t *xact) Commit() error {
 
-	t.ops = append(t.ops, op{ty: J_OP_TX_END})
+	if err := t.Tx.Commit(); err != nil {
+		return err
+	}
+
+	// quick exit for RO transaction
+	if t.ops == nil {
+		return nil
+	}
+
+	// RW transaction
+	//wseq := t.db.wseq.Add(1)
 
 	// XXX Send the transaction bunch
 	// Send it to a journal goroutine that will distribute to each replica
-	return t.Tx.Commit()
+	return nil
 }
 
 func (t *xact) Rollback() error {
-	t.ops = t.ops[:0]
+	if t.ops != nil {
+		t.ops = t.ops[:0]
+	}
 	return t.Tx.Rollback()
 }
 

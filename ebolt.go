@@ -5,6 +5,7 @@ package ebolt
 import (
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -20,6 +21,8 @@ type bdb struct {
 
 	// encrypts KV
 	c *encryptor
+
+	wseq atomic.Uint64
 }
 
 var _ DB = &bdb{}
