@@ -209,4 +209,17 @@ func (e *StorageError) Unwrap() error {
 	return e.Err
 }
 
+type ReplayError struct {
+	badOp op
+	Err   error
+}
+
+func (e *ReplayError) Error() string {
+	return fmt.Sprintf("replay: %s", e.Err)
+}
+
+func (e *ReplayError) Unwrap() error {
+	return e.Err
+}
+
 var _ error = &StorageError{}

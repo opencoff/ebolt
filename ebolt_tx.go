@@ -105,6 +105,21 @@ func (t *xact) leaf2bucket(p string) *bucket {
 	return b
 }
 
+// Given an array of buckets and leaf, auto-vivify everyone in the path.
+func (t *xact) makeBuckets(z [][]byte) (*bolt.Bucket, error) {
+	bu, err := t.CreateBucketIfNotExists(z[0])
+	if err != nil {
+		return nil, err
+	}
+
+	for _, x := range z[1:] {
+		if bu, err = bu.CreateBucketIfNotExists(x); err != nil {
+			return nil, err
+		}
+	}
+	return bu, nil
+}
+
 // given a path to a leaf-node (the "K" in KV) - make the intermediate
 // buckets and return encrypted leaf name
 func (t *xact) mkleaf2bucket(p string) (*bucket, error) {
@@ -113,15 +128,9 @@ func (t *xact) mkleaf2bucket(p string) (*bucket, error) {
 	n := len(z)
 	nm, z := z[n-1], z[:n-1]
 
-	bu, err := t.CreateBucketIfNotExists(z[0])
+	bu, err := t.makeBuckets(z)
 	if err != nil {
 		return nil, &StorageError{"new-bucket", p, err}
-	}
-
-	for _, x := range z[1:] {
-		if bu, err = bu.CreateBucketIfNotExists(x); err != nil {
-			return nil, &StorageError{"new-bucket", p, err}
-		}
 	}
 
 	b := &bucket{
@@ -352,6 +361,29 @@ func (t *xact) Rollback() error {
 
 func (t *xact) backup(wr io.Writer) (int64, error) {
 	return t.WriteTo(wr)
+}
+
+// Replay one or more operations within this transaction
+func (t *xact) replay(ops []op) error {
+
+	for i := range ops {
+		o := &ops[i]
+
+		bu, err := t.makeBuckets(o.path)
+		if err != nil {
+			return err
+		}
+
+		switch o.ty {
+		case J_OP_SET:
+			err = bu.Put(o.leaf, o.val)
+		case J_OP_DEL:
+			err = bu.Delete(o.leaf)
+		default:
+			return &ReplayError{*o, fmt.Errorf("unknown journal-op %d", o.ty)}
+		}
+	}
+	return nil
 }
 
 func (t *xact) recordSet(b *bucket, v []byte) {
