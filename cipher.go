@@ -29,7 +29,7 @@ type encryptor struct {
 	kv  cipher.AEAD
 	seg *SIV.AESSIV
 
-	// We store
+	// We use the IV as the AD for SIV mode
 	segAd []byte
 }
 
