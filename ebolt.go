@@ -3,17 +3,58 @@
 package ebolt
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
-	"sync/atomic"
+	"net/netip"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
 
 type Options struct {
 	bolt.Options
+}
 
-	// replication data
+type PrimaryOptions struct {
+	bolt.Options
+
+	// Server's TLS Cert
+	Cert *tls.Certificate
+
+	// mTLS CA pool
+	CA *x509.CertPool
+
+	// Listen addr:port
+	AddrPort netip.AddrPort
+
+	// optional: allowed IPs to connect to this primary
+	Replica []netip.Addr
+
+	// Other options
+
+	// How frequently do we batch writes to replicas
+	BatchInterval time.Duration
+
+	// Or How much data to accumulate before we replicate
+	BatchSize int
+
+	// # of transactions to buffer
+	CommitChanSize int
+}
+
+type ReplicaOptions struct {
+	bolt.Options
+
+	// mTLS Client certificate
+	Cert *tls.Certificate
+
+	// CA roots
+	CA *x509.CertPool
+
+	// IP:Port of the primary
+	Primary netip.AddrPort
 }
 
 type bdb struct {
@@ -22,7 +63,11 @@ type bdb struct {
 	// encrypts KV
 	c *encryptor
 
-	wseq atomic.Uint64
+	// replica manager - can be nil
+	p *primary
+
+	// replica - can be nil
+	r *replica
 }
 
 var _ DB = &bdb{}
@@ -57,9 +102,33 @@ func Open(fn string, key []byte, opt *Options) (DB, error) {
 	return b, nil
 }
 
+func OpenPrimary(dn string, key []byte, opt *PrimaryOptions) (DB, error) {
+	return nil, nil
+}
+
+func OpenReplica(dn string, opt *ReplicaOptions) (RDB, error) {
+	return nil, nil
+}
+
 // Close finalizes all transactions and releases database resources.
 func (b *bdb) Close() error {
-	return b.db.Close()
+	if err := b.db.Close(); err != nil {
+		return err
+	}
+
+	if b.p != nil {
+		if err := b.p.Close(); err != nil {
+			return fmt.Errorf("db: primary: %w", err)
+		}
+	}
+
+	if b.r != nil {
+		if err := b.r.Close(); err != nil {
+			return fmt.Errorf("db: replica: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // BeginTransaction starts a new transaction that can be either read-only

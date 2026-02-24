@@ -387,6 +387,10 @@ func (t *xact) replay(ops []op) error {
 }
 
 func (t *xact) recordSet(b *bucket, v []byte) {
+	if t.db.p == nil {
+		return
+	}
+
 	o := op{
 		ty:   J_OP_SET,
 		path: b.path,
@@ -398,6 +402,10 @@ func (t *xact) recordSet(b *bucket, v []byte) {
 }
 
 func (t *xact) recordDel(b *bucket) {
+	if t.db.p == nil {
+		return
+	}
+
 	o := op{
 		ty:   J_OP_DEL,
 		path: b.path,

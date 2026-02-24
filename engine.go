@@ -19,28 +19,12 @@ type KV struct {
 	Val []byte
 }
 
-// Ops interface defines the core operations for the encrypted database.
-type Ops interface {
+// ROps interface defines the core Read operations for the encrypted database.
+type ROps interface {
 	// Get retrieves and decrypts the value stored at the specified path.
 	// The path format "a/b/name" is interpreted where intermediate components
 	// are buckets and the final component is the key.
 	Get(p string) ([]byte, error)
-
-	// Set encrypts and stores a value at the specified path, automatically
-	// creating any intermediate buckets as needed. The leaf component of the
-	// path is obfuscated while bucket names remain in plaintext.
-	Set(p string, v []byte) error
-
-	// SetMany encrypts and stores multiple key-value pairs. Each key follows
-	// the path format with automatic bucket creation.
-	SetMany(v []KV) error
-
-	// Del removes the encrypted value at the specified path.
-	Del(p string) error
-
-	// DelMany deletes multiple keys in a single transaction.
-	// Each path is processed according to the hierarchical bucket structure.
-	DelMany(v []string) error
 
 	// All retrieves all entries within a given bucket path, returning a map
 	// of decrypted key-value pairs. The keys in the map are the original
@@ -56,6 +40,31 @@ type Ops interface {
 	// retrieving individual key-value pairs. In boltdb terminology,
 	// this returns all sub-buckets of a bucket.
 	Dir(p string) ([]string, error)
+}
+
+// WOps interface defines the core Write operations for the encrypted database.
+type WOps interface {
+	// Set encrypts and stores a value at the specified path, automatically
+	// creating any intermediate buckets as needed. The leaf component of the
+	// path is obfuscated while bucket names remain in plaintext.
+	Set(p string, v []byte) error
+
+	// SetMany encrypts and stores multiple key-value pairs. Each key follows
+	// the path format with automatic bucket creation.
+	SetMany(v []KV) error
+
+	// Del removes the encrypted value at the specified path.
+	Del(p string) error
+
+	// DelMany deletes multiple keys in a single transaction.
+	// Each path is processed according to the hierarchical bucket structure.
+	DelMany(v []string) error
+}
+
+// Ops interface defines both Read and Write operations for the encrypted database.
+type Ops interface {
+	ROps
+	WOps
 }
 
 // DB interface extends Ops with database management functionality
@@ -77,11 +86,44 @@ type DB interface {
 	Backup(wr io.Writer) (int64, error)
 }
 
+// RDB interface is a read-only interface presented by replicas
+type RDB interface {
+	ROps
+
+	// Close finalizes all transactions and releases database resources.
+	Close() error
+
+	// BeginTransaction starts a new transaction that can be either read-only
+	// or read-write. Multiple read-only transactions can run concurrently,
+	// but write transactions are exclusive.
+	BeginTransaction() (RTx, error)
+
+	// Backup performs a live backup of the encrypted database to the provided
+	// io.Writer, returning the number of bytes written. The database remains
+	// usable during the backup process.
+	Backup(wr io.Writer) (int64, error)
+}
+
+// Tx interface represents an active read-only transaction. This enables callers to perform
+// multiple read operations and either Commit() or Rollback()
+type RTx interface {
+	ROps
+
+	// Commit persists all changes made within this transaction to the database.
+	// After calling Commit, the transaction is no longer usable.
+	Commit() error
+
+	// Rollback discards all changes made within this transaction.
+	// After calling Rollback, the transaction is no longer usable.
+	Rollback() error
+}
+
 // Tx interface represents an active transaction. This enables callers to perform
 // multiple operations in 'Ops' and commit in the end or abort.
 type Tx interface {
-	// Ops embeds all operations from the Ops interface
-	Ops
+	// Ops embeds all operations from the ROps & WOps interface
+	ROps
+	WOps
 
 	// Commit persists all changes made within this transaction to the database.
 	// After calling Commit, the transaction is no longer usable.
